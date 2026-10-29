@@ -1,0 +1,493 @@
+openapi: 3.1.0
+info:
+  title: Task Management System API
+  version: 1.0.0
+  description: |
+    Shared backend for the React website and the future React Native app.
+
+    **Authentication.** Web clients log in with `client: "web"` and receive a Secure, HttpOnly session
+    cookie plus a `csrfToken`; every cookie-authenticated write must send it as `X-CSRF-Token`.
+    Mobile clients log in with `client: "mobile"` and receive a bearer `token` (store it in device secure storage).
+    Sessions expire after 30 minutes idle or 12 hours absolute.
+
+    **Idempotency.** Endpoints marked *idempotent* require an `Idempotency-Key` header (8–128 URL-safe chars).
+    Same key + same request replays the result (re-checked against current permissions); same key + different request → 409.
+
+    **Errors.** `{ "error": { "code", "message", "requestId", "details?" } }`. 400 validation, 401 unauthenticated,
+    403 role/CSRF, 404 unavailable (uniform, never reveals existence), 409 version/state conflict, 429 rate limited, 503 dependency unavailable.
+
+    **Dates.** `YYYY-MM-DD` fields are calendar dates in the business timezone (Asia/Karachi). Instants are ISO-8601 UTC.
+    Use `serverTime`/`editableUntil` from responses for countdowns — never the device clock.
+servers:
+  - url: /api/v1
+security:
+  - cookieAuth: []
+  - bearerAuth: []
+
+tags:
+  - name: Auth
+  - name: People (user)
+  - name: Tasks (user)
+  - name: Dashboard
+  - name: Admin users
+  - name: Admin people
+  - name: Admin tasks
+  - name: Admin reminders
+  - name: Admin settings
+  - name: Admin audit
+  - name: Admin backups
+
+components:
+  securitySchemes:
+    cookieAuth: { type: apiKey, in: cookie, name: __Host-sid, description: 'Web session cookie ("sid" when COOKIE_SECURE=false). Writes also need X-CSRF-Token.' }
+    bearerAuth: { type: http, scheme: bearer, description: Mobile session token }
+  parameters:
+    Id: { name: id, in: path, required: true, schema: { type: string, pattern: '^[a-f0-9]{24}$' } }
+    IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 8, maxLength: 128 } }
+    Page: { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+    Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+  responses:
+    Error:
+      description: Error
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          required: [code, message, requestId]
+          properties:
+            code: { type: string, examples: [EDIT_WINDOW_EXPIRED] }
+            message: { type: string, examples: ['The correction period has ended.'] }
+            requestId: { type: string }
+            details: {}
+    Location:
+      type: object
+      description: Optional. latitude and longitude must be supplied together.
+      properties:
+        addressText: { type: string, maxLength: 300 }
+        latitude: { type: number, minimum: -90, maximum: 90 }
+        longitude: { type: number, minimum: -180, maximum: 180 }
+    PersonInput:
+      type: object
+      additionalProperties: false
+      required: [name, phone, requestedWorkDate]
+      properties:
+        name: { type: string, maxLength: 120 }
+        phone: { type: string, description: 'Include country code, or a local number for the default country (PK).' }
+        requestedWorkDate: { type: string, format: date }
+        location: { $ref: '#/components/schemas/Location' }
+      example: { name: Muhammad Ali, phone: '+923001234567', requestedWorkDate: '2026-11-10', location: { addressText: 'Commercial Market, Rawalpindi' } }
+    PersonUpdate:
+      type: object
+      additionalProperties: false
+      required: [version]
+      properties:
+        version: { type: integer }
+        name: { type: string }
+        phone: { type: string }
+        requestedWorkDate: { type: string, format: date }
+        location: { oneOf: [{ $ref: '#/components/schemas/Location' }, { type: 'null' }] }
+    CreatorPerson:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        phone: { type: string }
+        requestedWorkDate: { type: string, format: date }
+        location: { oneOf: [{ $ref: '#/components/schemas/Location' }, { type: 'null' }] }
+        editableUntil: { type: string, format: date-time }
+        serverTime: { type: string, format: date-time }
+        version: { type: integer }
+    AdminPerson:
+      allOf:
+        - $ref: '#/components/schemas/CreatorPerson'
+        - type: object
+          properties:
+            phoneNormalized: { type: string }
+            createdBy: { type: string }
+            creatorRole: { enum: [ADMIN, USER] }
+            status: { enum: [ACTIVE, ARCHIVED] }
+            possibleDuplicate: { type: boolean }
+    AssigneeTask:
+      type: object
+      properties:
+        id: { type: string }
+        type: { enum: [WORK, FOLLOW_UP] }
+        status: { enum: [ASSIGNED] }
+        scheduledDate: { type: string, format: date }
+        instructions: { type: string }
+        requiresOutcome: { type: boolean }
+        person:
+          type: object
+          properties: { name: { type: string }, phone: { type: string }, requestedWorkDate: { type: string }, location: {} }
+        version: { type: integer }
+    AdminTask:
+      type: object
+      properties:
+        id: { type: string }
+        personId: { type: string }
+        type: { enum: [WORK, FOLLOW_UP] }
+        status: { enum: [ASSIGNED, COMPLETED, CANCELLED] }
+        assignedTo: { type: string }
+        scheduledDate: { type: string, format: date }
+        followUpOutcome: { enum: [NEEDS_WORK, NO_WORK_NEEDED, UNREACHABLE, null] }
+        needsReassignment: { type: boolean }
+        followUpPolicySnapshot: { $ref: '#/components/schemas/FollowUpPolicy' }
+        version: { type: integer }
+    FollowUpPolicy:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        intervalDays: { type: integer }
+        reminderTime: { type: string, pattern: '^\d{2}:\d{2}$' }
+        repeatFollowUps: { type: boolean }
+        unreachableRetryDays: { type: integer }
+        maxUnreachableAttempts: { type: integer }
+    Receipt:
+      type: object
+      properties: { taskId: { type: string }, status: { type: string }, completedAt: { type: string, format: date-time } }
+    Reminder:
+      type: object
+      properties:
+        id: { type: string }
+        personId: { type: string }
+        person: { type: object, properties: { name: { type: string }, phone: { type: string } } }
+        dueAt: { type: string, format: date-time }
+        isDue: { type: boolean }
+        status: { enum: [SCHEDULED, ASSIGNED, RESOLVED, DISMISSED] }
+        reason: { enum: [AFTER_WORK, REPEAT, UNREACHABLE_RETRY] }
+        attempt: { type: integer }
+        assignedTaskId: { type: [string, 'null'] }
+        version: { type: integer }
+    SafeUser:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        username: { type: string }
+        phone: { type: [string, 'null'] }
+        role: { enum: [ADMIN, USER] }
+        status: { enum: [INVITED, ACTIVE, INACTIVE] }
+        version: { type: integer }
+
+paths:
+  /auth/admin/login:
+    post:
+      tags: [Auth]
+      summary: Log in (ADMIN accounts only)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties: { username: { type: string }, password: { type: string }, client: { enum: [web, mobile], default: web } }
+      responses:
+        '200': { description: 'Session created. Web → cookie + csrfToken; mobile → token.' }
+        '401': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /auth/user/login:
+    post:
+      tags: [Auth]
+      summary: Log in (USER accounts only). A USER at the admin endpoint (or vice versa) gets the same generic 401.
+      security: []
+      requestBody: { $ref: '#/paths/~1auth~1admin~1login/post/requestBody' }
+      responses:
+        '200': { description: Session created }
+        '401': { $ref: '#/components/responses/Error' }
+  /auth/logout:
+    post: { tags: [Auth], summary: Revoke current session, responses: { '204': { description: Logged out } } }
+  /auth/logout-all:
+    post: { tags: [Auth], summary: Revoke all sessions for the current account, responses: { '204': { description: Logged out everywhere } } }
+  /auth/me:
+    get: { tags: [Auth], summary: Safe identity and permissions, responses: { '200': { description: Identity } } }
+  /auth/set-password:
+    post:
+      tags: [Auth]
+      summary: Consume a single-use setup token (from the invite link) and set the password
+      security: []
+      requestBody:
+        content: { application/json: { schema: { type: object, required: [token, password], properties: { token: { type: string }, password: { type: string, minLength: 10, maxLength: 128 } } } } }
+      responses: { '200': { description: Password set; account ACTIVE }, '400': { $ref: '#/components/responses/Error' } }
+  /auth/reset-password:
+    post:
+      tags: [Auth]
+      summary: Consume a password-reset token. Revokes all sessions.
+      security: []
+      requestBody: { $ref: '#/paths/~1auth~1set-password/post/requestBody' }
+      responses: { '200': { description: Password reset }, '400': { $ref: '#/components/responses/Error' } }
+  /auth/change-password:
+    post:
+      tags: [Auth]
+      summary: Change password (verifies current). Other sessions are revoked.
+      requestBody:
+        content: { application/json: { schema: { type: object, required: [currentPassword, newPassword], properties: { currentPassword: { type: string }, newPassword: { type: string } } } } }
+      responses: { '200': { description: Changed }, '401': { $ref: '#/components/responses/Error' } }
+
+  /people:
+    post:
+      tags: [People (user)]
+      summary: Submit a person (USER). Idempotent. Editable by the creator for 10 minutes.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/PersonInput' } } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/CreatorPerson' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+  /people/recent:
+    get:
+      tags: [People (user)]
+      summary: The caller's own entries still inside the correction window
+      responses: { '200': { description: 'items[] of CreatorPerson + serverTime' } }
+  /people/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [People (user)]
+      summary: Creator access within the correction window (404 otherwise)
+      responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/CreatorPerson' } } } }, '404': { $ref: '#/components/responses/Error' } }
+    patch:
+      tags: [People (user)]
+      summary: Creator edit within the window. Does not extend the deadline.
+      requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/PersonUpdate' } } } }
+      responses:
+        '200': { description: Updated }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { description: 'EDIT_WINDOW_EXPIRED or VERSION_CONFLICT', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /tasks/mine:
+    get:
+      tags: [Tasks (user)]
+      summary: The caller's active (ASSIGNED) tasks with task-scoped customer details
+      responses: { '200': { description: 'items[] of AssigneeTask' } }
+  /tasks/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Tasks (user)]
+      summary: Own active task detail (404 once completed, cancelled or reassigned)
+      responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/AssigneeTask' } } } }, '404': { $ref: '#/components/responses/Error' } }
+  /tasks/{id}/complete:
+    parameters: [{ $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+    post:
+      tags: [Tasks (user)]
+      summary: Complete own task. FOLLOW_UP tasks require followUpOutcome. Repeats return the same receipt.
+      requestBody:
+        content: { application/json: { schema: { type: object, properties: { completionNotes: { type: string }, followUpOutcome: { enum: [NEEDS_WORK, NO_WORK_NEEDED, UNREACHABLE] } } } } }
+      responses:
+        '200': { description: Receipt, content: { application/json: { schema: { $ref: '#/components/schemas/Receipt' } } } }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /dashboard:
+    get: { tags: [Dashboard], summary: 'USER: own task totals and recent-entry count', responses: { '200': { description: OK } } }
+  /admin/dashboard:
+    get: { tags: [Dashboard], summary: 'ADMIN: totals, due reminders, attention items, backup status', responses: { '200': { description: OK } } }
+
+  /admin/users:
+    post:
+      tags: [Admin users]
+      summary: Create an INVITED user; returns a one-time setup link to deliver securely
+      requestBody:
+        content: { application/json: { schema: { type: object, required: [name, username], properties: { name: { type: string }, username: { type: string }, phone: { type: string } } } } }
+      responses: { '201': { description: '{ user, setupLink: { url, expiresAt } }' }, '409': { $ref: '#/components/responses/Error' } }
+    get:
+      tags: [Admin users]
+      summary: List users
+      parameters: [{ $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/Limit' }, { name: status, in: query, schema: { enum: [INVITED, ACTIVE, INACTIVE] } }, { name: role, in: query, schema: { enum: [ADMIN, USER] } }, { name: search, in: query, schema: { type: string } }]
+      responses: { '200': { description: Paged SafeUser list } }
+  /admin/users/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get: { tags: [Admin users], summary: Safe profile, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/SafeUser' } } } } } }
+    patch:
+      tags: [Admin users]
+      summary: Update allowlisted profile fields (name, phone)
+      requestBody: { content: { application/json: { schema: { type: object, required: [version], properties: { version: { type: integer }, name: { type: string }, phone: { type: [string, 'null'] } } } } } }
+      responses: { '200': { description: Updated }, '409': { $ref: '#/components/responses/Error' } }
+  /admin/users/{id}/deactivate:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post: { tags: [Admin users], summary: Deactivate; revokes sessions and flags open tasks for reassignment. Last active admin is protected., responses: { '200': { description: OK }, '409': { $ref: '#/components/responses/Error' } } }
+  /admin/users/{id}/activate:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post: { tags: [Admin users], summary: Reactivate, responses: { '200': { description: OK } } }
+  /admin/users/{id}/reset-password:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post: { tags: [Admin users], summary: Issue an expiring reset (or fresh setup) link, responses: { '200': { description: '{ purpose, link: { url, expiresAt } }' } } }
+  /admin/users/{id}/change-role:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Admin users]
+      summary: Dedicated, audited role change (reason required; sessions revoked; last-admin protection)
+      requestBody: { content: { application/json: { schema: { type: object, required: [role, reason, version], properties: { role: { enum: [ADMIN, USER] }, reason: { type: string }, version: { type: integer } } } } } }
+      responses: { '200': { description: OK }, '409': { $ref: '#/components/responses/Error' } }
+
+  /admin/people:
+    post:
+      tags: [Admin people]
+      summary: Admin creates a person. Idempotent.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/PersonInput' } } } }
+      responses: { '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/AdminPerson' } } } } }
+    get:
+      tags: [Admin people]
+      summary: Search/list people
+      parameters:
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/Limit' }
+        - { name: search, in: query, description: Name substring or phone number, schema: { type: string, maxLength: 64 } }
+        - { name: status, in: query, schema: { enum: [ACTIVE, ARCHIVED] } }
+        - { name: possibleDuplicate, in: query, schema: { enum: ['true', 'false'] } }
+        - { name: createdBy, in: query, schema: { type: string } }
+        - { name: workDateFrom, in: query, schema: { type: string, format: date } }
+        - { name: workDateTo, in: query, schema: { type: string, format: date } }
+        - { name: sort, in: query, schema: { enum: [createdAt, -createdAt, name, -name, requestedWorkDate, -requestedWorkDate] } }
+      responses: { '200': { description: Paged AdminPerson list } }
+  /admin/people/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get: { tags: [Admin people], summary: Detail with task/reminder history and possible duplicates, responses: { '200': { description: OK } } }
+    patch:
+      tags: [Admin people]
+      summary: Admin edit (version required)
+      requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/PersonUpdate' } } } }
+      responses: { '200': { description: OK }, '409': { $ref: '#/components/responses/Error' } }
+  /admin/people/{id}/archive:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post: { tags: [Admin people], summary: Archive (blocked with ACTIVE_TASKS_EXIST while tasks are open; pending reminders dismissed), responses: { '200': { description: OK }, '409': { $ref: '#/components/responses/Error' } } }
+  /admin/people/{id}/restore:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post: { tags: [Admin people], summary: Unarchive, responses: { '200': { description: OK } } }
+
+  /admin/tasks:
+    post:
+      tags: [Admin tasks]
+      summary: Create an assigned WORK task. Idempotent. Response may include warnings (SCHEDULED_DATE_IN_PAST).
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [personId, assignedTo, scheduledDate]
+              properties:
+                personId: { type: string }
+                assignedTo: { type: string }
+                scheduledDate: { type: string, format: date }
+                instructions: { type: string, maxLength: 2000 }
+                followUpPolicy: { $ref: '#/components/schemas/FollowUpPolicy' }
+                fromFollowUpTaskId: { type: string, description: Marks a NEEDS_WORK outcome as reviewed }
+      responses: { '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/AdminTask' } } } }, '409': { $ref: '#/components/responses/Error' } }
+    get:
+      tags: [Admin tasks]
+      summary: Filtered task list (all statuses)
+      parameters:
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/Limit' }
+        - { name: status, in: query, schema: { enum: [ASSIGNED, COMPLETED, CANCELLED] } }
+        - { name: type, in: query, schema: { enum: [WORK, FOLLOW_UP] } }
+        - { name: assignedTo, in: query, schema: { type: string } }
+        - { name: personId, in: query, schema: { type: string } }
+        - { name: needsReassignment, in: query, schema: { enum: ['true', 'false'] } }
+        - { name: followUpOutcome, in: query, schema: { enum: [NEEDS_WORK, NO_WORK_NEEDED, UNREACHABLE] } }
+        - { name: overdue, in: query, schema: { enum: ['true'] } }
+        - { name: scheduledFrom, in: query, schema: { type: string, format: date } }
+        - { name: scheduledTo, in: query, schema: { type: string, format: date } }
+        - { name: sort, in: query, schema: { type: string } }
+      responses: { '200': { description: Paged AdminTask list } }
+  /admin/tasks/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get: { tags: [Admin tasks], summary: Task detail with generated reminder, responses: { '200': { description: OK } } }
+    patch:
+      tags: [Admin tasks]
+      summary: Update an open task (scheduledDate, instructions, followUpPolicy)
+      requestBody: { content: { application/json: { schema: { type: object, required: [version], properties: { version: { type: integer }, scheduledDate: { type: string }, instructions: { type: string }, followUpPolicy: { $ref: '#/components/schemas/FollowUpPolicy' } } } } } }
+      responses: { '200': { description: OK }, '409': { $ref: '#/components/responses/Error' } }
+  /admin/tasks/{id}/reassign:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Admin tasks]
+      summary: Atomically change assignee (version required)
+      requestBody: { content: { application/json: { schema: { type: object, required: [assignedTo, version], properties: { assignedTo: { type: string }, version: { type: integer } } } } } }
+      responses: { '200': { description: OK }, '409': { $ref: '#/components/responses/Error' } }
+  /admin/tasks/{id}/cancel:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Admin tasks]
+      summary: Cancel an open task. Follow-up tasks require reminderAction.
+      requestBody: { content: { application/json: { schema: { type: object, required: [reason], properties: { reason: { type: string }, version: { type: integer }, reminderAction: { enum: [RESCHEDULE, DISMISS] }, rescheduleTo: { type: string, format: date-time } } } } } }
+      responses: { '200': { description: OK }, '409': { $ref: '#/components/responses/Error' } }
+  /admin/tasks/{id}/complete:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Admin tasks]
+      summary: Audited admin completion override (reason required)
+      requestBody: { content: { application/json: { schema: { type: object, required: [reason], properties: { reason: { type: string }, completionNotes: { type: string }, followUpOutcome: { enum: [NEEDS_WORK, NO_WORK_NEEDED, UNREACHABLE] } } } } } }
+      responses: { '200': { description: Receipt } }
+
+  /admin/reminders:
+    get:
+      tags: [Admin reminders]
+      summary: Due (default), upcoming or all reminders. Due = SCHEDULED and dueAt <= server time.
+      parameters: [{ $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/Limit' }, { name: view, in: query, schema: { enum: [due, upcoming, all], default: due } }, { name: status, in: query, description: 'with view=all', schema: { enum: [SCHEDULED, ASSIGNED, RESOLVED, DISMISSED] } }]
+      responses: { '200': { description: 'items[] of Reminder + serverTime' } }
+  /admin/reminders/{id}/assign:
+    parameters: [{ $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+    post:
+      tags: [Admin reminders]
+      summary: Create exactly one FOLLOW_UP task and mark the reminder ASSIGNED. Idempotent.
+      requestBody: { content: { application/json: { schema: { type: object, required: [assignedTo], properties: { assignedTo: { type: string }, scheduledDate: { type: string, format: date }, instructions: { type: string }, followUpPolicy: { $ref: '#/components/schemas/FollowUpPolicy' } } } } } }
+      responses: { '201': { description: '{ reminderId, taskId }' }, '409': { $ref: '#/components/responses/Error' } }
+  /admin/reminders/{id}/snooze:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Admin reminders]
+      summary: Reschedule an unassigned reminder (exactly one of until / days)
+      requestBody: { content: { application/json: { schema: { type: object, properties: { until: { type: string, format: date-time }, days: { type: integer, minimum: 1 } } } } } }
+      responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Reminder' } } } } }
+  /admin/reminders/{id}/dismiss:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Admin reminders]
+      summary: Dismiss an unassigned reminder (reason required)
+      requestBody: { content: { application/json: { schema: { type: object, required: [reason], properties: { reason: { type: string } } } } } }
+      responses: { '200': { description: OK }, '409': { $ref: '#/components/responses/Error' } }
+
+  /admin/settings:
+    get: { tags: [Admin settings], summary: Read settings, responses: { '200': { description: OK } } }
+    patch:
+      tags: [Admin settings]
+      summary: Update settings (version required). Applies to tasks created afterwards; existing reminders are not rewritten.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version: { type: integer }
+                timezone: { type: string }
+                followUp: { $ref: '#/components/schemas/FollowUpPolicy' }
+                backup: { type: object, properties: { enabled: { type: boolean }, scheduleTime: { type: string }, retentionCount: { type: integer } } }
+      responses: { '200': { description: OK }, '409': { $ref: '#/components/responses/Error' } }
+
+  /admin/audit-logs:
+    get:
+      tags: [Admin audit]
+      summary: Activity history (safe summaries only)
+      parameters: [{ $ref: '#/components/parameters/Page' }, { $ref: '#/components/parameters/Limit' }, { name: action, in: query, schema: { type: string } }, { name: entityType, in: query, schema: { type: string } }, { name: entityId, in: query, schema: { type: string } }, { name: actorId, in: query, schema: { type: string } }, { name: from, in: query, schema: { type: string, format: date-time } }, { name: to, in: query, schema: { type: string, format: date-time } }]
+      responses: { '200': { description: Paged audit events } }
+
+  /admin/backups:
+    get: { tags: [Admin backups], summary: Backup history, last success and job health, responses: { '200': { description: OK } } }
+    post: { tags: [Admin backups], summary: Queue a manual backup, responses: { '202': { description: '{ jobId, alreadyQueued }' }, '409': { $ref: '#/components/responses/Error' } } }
+  /admin/integrations/drive/status:
+    get: { tags: [Admin backups], summary: Google Drive connection status, responses: { '200': { description: OK } } }
+  /admin/integrations/drive/connect:
+    post: { tags: [Admin backups], summary: 'Start OAuth (offline access, drive.file scope). Returns { authUrl } to open in the browser.', responses: { '200': { description: OK } } }
+  /admin/integrations/drive/callback:
+    get:
+      tags: [Admin backups]
+      summary: OAuth redirect target. Validates single-use state bound to the admin, stores the refresh token encrypted, creates the backup folder, then redirects to the web settings page.
+      parameters: [{ name: state, in: query, required: true, schema: { type: string } }, { name: code, in: query, schema: { type: string } }, { name: error, in: query, schema: { type: string } }]
+      responses: { '302': { description: Redirect to WEB_BASE_URL/admin/settings/backups?drive=<result> } }
+  /admin/integrations/drive/disconnect:
+    post: { tags: [Admin backups], summary: Revoke and remove the stored Drive authorization, responses: { '200': { description: OK } } }
