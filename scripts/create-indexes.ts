@@ -3,6 +3,7 @@
  *   npm run create-indexes            # create/sync
  *   npm run create-indexes -- --dry   # show differences only
  */
+import 'dotenv/config';
 import { parseArgs } from 'util';
 import mongoose from 'mongoose';
 import { allModels } from '../src/database/models';

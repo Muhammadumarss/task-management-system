@@ -13,7 +13,8 @@
     "typecheck": "tsc --noEmit",
     "bootstrap-admin": "tsx scripts/bootstrap-admin.ts",
     "create-indexes": "tsx scripts/create-indexes.ts",
-    "restore-backup": "tsx scripts/restore-backup.ts"
+    "restore-backup": "tsx scripts/restore-backup.ts",
+    "check-db": "tsx scripts/check-db.ts"
   },
   "keywords": [],
   "author": "",
